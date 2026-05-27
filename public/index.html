@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IW Ops Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,sans-serif;background:#f5f3ef;color:#1b1c51;padding:1.25rem}
+  .wrap{max-width:1100px;margin:0 auto}
+  .hdr{margin-bottom:1.25rem}
+  .hdr-top{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .hdr-label{font-size:12px;color:#888;margin-bottom:3px;text-transform:uppercase;letter-spacing:.04em}
+  .hdr-num{font-size:2rem;font-weight:600;line-height:1}
+  .hdr-sub{font-size:13px;color:#666;margin-top:4px}
+  .hdr-snap{font-size:11px;color:#aaa;text-align:right;line-height:1.6}
+  .platform-row{display:flex;gap:2rem;margin-top:.75rem;flex-wrap:wrap}
+  .pstat{font-size:12px;color:#666}.pstat strong{color:#1b1c51;font-weight:600}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:1.5rem}
+  .card{background:#fff;border:0.5px solid #e0ddd6;border-radius:12px;padding:14px 16px 12px}
+  .card-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:5px}
+  .card-mkt{font-size:15px;font-weight:600}
+  .card-tgt{font-size:11px;color:#aaa;margin-top:2px}
+  .card-main{display:flex;align-items:baseline;gap:7px;margin-bottom:3px}
+  .card-num{font-size:28px;font-weight:600;line-height:1}
+  .card-delta{font-size:12px;font-weight:600}
+  .up{color:#00a775}.dn{color:#d85a30}.flat{color:#aaa}
+  .card-periods{display:flex;gap:12px;font-size:11px;color:#888;margin-bottom:9px}
+  .card-periods strong{color:#1b1c51;font-weight:500}
+  .badge{display:inline-block;font-size:11px;padding:3px 10px;border-radius:20px;font-weight:500;margin-bottom:9px}
+  .b-green{background:#e1f5ee;color:#0f6e56}
+  .b-orange{background:#faece7;color:#993c1d}
+  .b-amber{background:#faeeda;color:#854f0b}
+  .b-blue{background:#e6f1fb;color:#185fa5}
+  .verdict{font-size:11px;color:#666;line-height:1.45;margin-bottom:9px;border-left:2px solid #e0ddd6;padding-left:8px}
+  .vstats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px 6px;margin-bottom:9px}
+  .vstat{font-size:10px;color:#aaa}.vstat strong{display:block;font-size:12px;font-weight:500;color:#1b1c51}
+  .chart-wrap{position:relative;height:68px}
+  .legend{display:flex;gap:10px;margin-top:5px;flex-wrap:wrap;font-size:10px;color:#aaa}
+  .legend span{display:flex;align-items:center;gap:3px}
+  .leg-line{display:inline-block;width:14px;height:2px;border-radius:1px}
+  .leg-band{display:inline-block;width:14px;height:7px;border-radius:2px}
+  .leg-dot{display:inline-block;width:7px;height:7px;border-radius:50%}
+  .divider{border:none;border-top:0.5px solid #e0ddd6;margin:1.25rem 0}
+  .action-title{font-size:11px;font-weight:600;color:#aaa;text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:#aaa;font-weight:400;padding:0 12px 8px 0;border-bottom:0.5px solid #e0ddd6}
+  td{padding:10px 12px 10px 0;border-bottom:0.5px solid #e0ddd6;vertical-align:top;color:#1b1c51}
+  tr:last-child td{border-bottom:none}
+  .bar-wrap{display:flex;align-items:center;gap:7px}
+  .bar-bg{width:60px;height:5px;background:#f0ede8;border-radius:3px;flex-shrink:0}
+  .bar-fill{height:5px;border-radius:3px;background:#d85a30}
+  footer{margin-top:1.5rem;font-size:11px;color:#bbb;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="hdr">
+  <div class="hdr-top">
+    <div>
+      <div class="hdr-label">Platform — productive hauls per business day</div>
+      <div class="hdr-num" id="plat-num">—</div>
+      <div class="hdr-sub" id="plat-sub"></div>
+    </div>
+    <div class="hdr-snap">snapshot 7:00 PM CT<br>completed + dry hauls</div>
+  </div>
+  <div class="platform-row" id="plat-row"></div>
+</div>
+
+<div class="cards" id="cards"></div>
+
+<hr class="divider">
+<div class="action-title">Action plan — markets off target</div>
+<table>
+  <thead><tr>
+    <th style="width:60px">Market</th>
+    <th style="width:110px">Verdict</th>
+    <th>% days below min (MTD)</th>
+    <th style="width:200px">Investigate</th>
+  </tr></thead>
+  <tbody id="action-body"></tbody>
+</table>
+
+<footer id="footer"></footer>
+</div>
+
+<script>
+// ── Data (baked in at build time) ───────────────────────────────────────────
+const SNAPSHOT_DATE = "2026-05-26";
+const TODAY_DATA = {
+  BHM: { productive_today:13, addressable_today:37, active_drivers:4 },
+  BNA: { productive_today:16, addressable_today:31, active_drivers:3 },
+  DFW: { productive_today:26, addressable_today:71, active_drivers:9 },
+  HSV: { productive_today:0,  addressable_today:6,  active_drivers:0 },
+  SAT: { productive_today:21, addressable_today:41, active_drivers:5 },
+};
+const RAW = [
+  {m:"BHM",d:"2026-04-01",v:38,p:"apr"},{m:"BHM",d:"2026-04-02",v:27,p:"apr"},{m:"BHM",d:"2026-04-03",v:34,p:"apr"},{m:"BHM",d:"2026-04-06",v:35,p:"apr"},{m:"BHM",d:"2026-04-07",v:36,p:"apr"},{m:"BHM",d:"2026-04-08",v:33,p:"apr"},{m:"BHM",d:"2026-04-09",v:35,p:"apr"},{m:"BHM",d:"2026-04-10",v:34,p:"apr"},{m:"BHM",d:"2026-04-13",v:32,p:"apr"},{m:"BHM",d:"2026-04-14",v:37,p:"apr"},{m:"BHM",d:"2026-04-15",v:30,p:"apr"},{m:"BHM",d:"2026-04-16",v:36,p:"apr"},{m:"BHM",d:"2026-04-17",v:37,p:"apr"},{m:"BHM",d:"2026-04-20",v:31,p:"apr"},{m:"BHM",d:"2026-04-21",v:34,p:"apr"},{m:"BHM",d:"2026-04-22",v:38,p:"apr"},{m:"BHM",d:"2026-04-23",v:46,p:"apr"},{m:"BHM",d:"2026-04-24",v:34,p:"apr"},{m:"BHM",d:"2026-04-27",v:29,p:"apr"},{m:"BHM",d:"2026-04-28",v:38,p:"apr"},{m:"BHM",d:"2026-04-29",v:36,p:"apr"},{m:"BHM",d:"2026-04-30",v:28,p:"apr"},
+  {m:"BHM",d:"2026-05-01",v:34,p:"may"},{m:"BHM",d:"2026-05-04",v:33,p:"may"},{m:"BHM",d:"2026-05-05",v:41,p:"may"},{m:"BHM",d:"2026-05-06",v:47,p:"may"},{m:"BHM",d:"2026-05-07",v:35,p:"may"},{m:"BHM",d:"2026-05-08",v:40,p:"may"},{m:"BHM",d:"2026-05-11",v:19,p:"may"},{m:"BHM",d:"2026-05-12",v:37,p:"may"},{m:"BHM",d:"2026-05-13",v:30,p:"may"},{m:"BHM",d:"2026-05-14",v:35,p:"may"},{m:"BHM",d:"2026-05-15",v:33,p:"may"},{m:"BHM",d:"2026-05-18",v:29,p:"may"},{m:"BHM",d:"2026-05-19",v:31,p:"may"},{m:"BHM",d:"2026-05-20",v:41,p:"may"},{m:"BHM",d:"2026-05-21",v:20,p:"may"},{m:"BHM",d:"2026-05-22",v:18,p:"may"},{m:"BHM",d:"2026-05-25",v:0,p:"may"},{m:"BHM",d:"2026-05-26",v:13,p:"may"},
+  {m:"BNA",d:"2026-04-01",v:17,p:"apr"},{m:"BNA",d:"2026-04-02",v:14,p:"apr"},{m:"BNA",d:"2026-04-03",v:12,p:"apr"},{m:"BNA",d:"2026-04-06",v:16,p:"apr"},{m:"BNA",d:"2026-04-07",v:18,p:"apr"},{m:"BNA",d:"2026-04-08",v:20,p:"apr"},{m:"BNA",d:"2026-04-09",v:14,p:"apr"},{m:"BNA",d:"2026-04-10",v:17,p:"apr"},{m:"BNA",d:"2026-04-13",v:11,p:"apr"},{m:"BNA",d:"2026-04-14",v:18,p:"apr"},{m:"BNA",d:"2026-04-15",v:17,p:"apr"},{m:"BNA",d:"2026-04-16",v:13,p:"apr"},{m:"BNA",d:"2026-04-17",v:13,p:"apr"},{m:"BNA",d:"2026-04-20",v:14,p:"apr"},{m:"BNA",d:"2026-04-21",v:18,p:"apr"},{m:"BNA",d:"2026-04-22",v:16,p:"apr"},{m:"BNA",d:"2026-04-23",v:20,p:"apr"},{m:"BNA",d:"2026-04-24",v:17,p:"apr"},{m:"BNA",d:"2026-04-27",v:7,p:"apr"},{m:"BNA",d:"2026-04-28",v:21,p:"apr"},{m:"BNA",d:"2026-04-29",v:16,p:"apr"},{m:"BNA",d:"2026-04-30",v:13,p:"apr"},
+  {m:"BNA",d:"2026-05-01",v:21,p:"may"},{m:"BNA",d:"2026-05-04",v:21,p:"may"},{m:"BNA",d:"2026-05-05",v:22,p:"may"},{m:"BNA",d:"2026-05-06",v:9,p:"may"},{m:"BNA",d:"2026-05-07",v:14,p:"may"},{m:"BNA",d:"2026-05-08",v:16,p:"may"},{m:"BNA",d:"2026-05-11",v:16,p:"may"},{m:"BNA",d:"2026-05-12",v:22,p:"may"},{m:"BNA",d:"2026-05-13",v:20,p:"may"},{m:"BNA",d:"2026-05-14",v:23,p:"may"},{m:"BNA",d:"2026-05-15",v:15,p:"may"},{m:"BNA",d:"2026-05-18",v:12,p:"may"},{m:"BNA",d:"2026-05-19",v:19,p:"may"},{m:"BNA",d:"2026-05-20",v:19,p:"may"},{m:"BNA",d:"2026-05-21",v:23,p:"may"},{m:"BNA",d:"2026-05-22",v:23,p:"may"},{m:"BNA",d:"2026-05-25",v:0,p:"may"},{m:"BNA",d:"2026-05-26",v:16,p:"may"},
+  {m:"DFW",d:"2026-04-01",v:59,p:"apr"},{m:"DFW",d:"2026-04-02",v:49,p:"apr"},{m:"DFW",d:"2026-04-03",v:34,p:"apr"},{m:"DFW",d:"2026-04-06",v:24,p:"apr"},{m:"DFW",d:"2026-04-07",v:47,p:"apr"},{m:"DFW",d:"2026-04-08",v:47,p:"apr"},{m:"DFW",d:"2026-04-09",v:49,p:"apr"},{m:"DFW",d:"2026-04-10",v:44,p:"apr"},{m:"DFW",d:"2026-04-13",v:20,p:"apr"},{m:"DFW",d:"2026-04-14",v:58,p:"apr"},{m:"DFW",d:"2026-04-15",v:50,p:"apr"},{m:"DFW",d:"2026-04-16",v:44,p:"apr"},{m:"DFW",d:"2026-04-17",v:43,p:"apr"},{m:"DFW",d:"2026-04-20",v:34,p:"apr"},{m:"DFW",d:"2026-04-21",v:36,p:"apr"},{m:"DFW",d:"2026-04-22",v:45,p:"apr"},{m:"DFW",d:"2026-04-23",v:43,p:"apr"},{m:"DFW",d:"2026-04-24",v:46,p:"apr"},{m:"DFW",d:"2026-04-27",v:31,p:"apr"},{m:"DFW",d:"2026-04-28",v:62,p:"apr"},{m:"DFW",d:"2026-04-29",v:53,p:"apr"},{m:"DFW",d:"2026-04-30",v:53,p:"apr"},
+  {m:"DFW",d:"2026-05-01",v:47,p:"may"},{m:"DFW",d:"2026-05-04",v:31,p:"may"},{m:"DFW",d:"2026-05-05",v:46,p:"may"},{m:"DFW",d:"2026-05-06",v:53,p:"may"},{m:"DFW",d:"2026-05-07",v:45,p:"may"},{m:"DFW",d:"2026-05-08",v:58,p:"may"},{m:"DFW",d:"2026-05-11",v:22,p:"may"},{m:"DFW",d:"2026-05-12",v:49,p:"may"},{m:"DFW",d:"2026-05-13",v:31,p:"may"},{m:"DFW",d:"2026-05-14",v:47,p:"may"},{m:"DFW",d:"2026-05-15",v:44,p:"may"},{m:"DFW",d:"2026-05-18",v:25,p:"may"},{m:"DFW",d:"2026-05-19",v:53,p:"may"},{m:"DFW",d:"2026-05-20",v:47,p:"may"},{m:"DFW",d:"2026-05-21",v:50,p:"may"},{m:"DFW",d:"2026-05-22",v:50,p:"may"},{m:"DFW",d:"2026-05-25",v:2,p:"may"},{m:"DFW",d:"2026-05-26",v:26,p:"may"},
+  {m:"HSV",d:"2026-04-01",v:6,p:"apr"},{m:"HSV",d:"2026-04-02",v:8,p:"apr"},{m:"HSV",d:"2026-04-03",v:3,p:"apr"},{m:"HSV",d:"2026-04-06",v:0,p:"apr"},{m:"HSV",d:"2026-04-07",v:4,p:"apr"},{m:"HSV",d:"2026-04-08",v:6,p:"apr"},{m:"HSV",d:"2026-04-09",v:5,p:"apr"},{m:"HSV",d:"2026-04-10",v:1,p:"apr"},{m:"HSV",d:"2026-04-13",v:4,p:"apr"},{m:"HSV",d:"2026-04-14",v:5,p:"apr"},{m:"HSV",d:"2026-04-15",v:4,p:"apr"},{m:"HSV",d:"2026-04-16",v:5,p:"apr"},{m:"HSV",d:"2026-04-17",v:2,p:"apr"},{m:"HSV",d:"2026-04-20",v:3,p:"apr"},{m:"HSV",d:"2026-04-21",v:7,p:"apr"},{m:"HSV",d:"2026-04-22",v:4,p:"apr"},{m:"HSV",d:"2026-04-23",v:8,p:"apr"},{m:"HSV",d:"2026-04-24",v:5,p:"apr"},{m:"HSV",d:"2026-04-27",v:4,p:"apr"},{m:"HSV",d:"2026-04-28",v:8,p:"apr"},{m:"HSV",d:"2026-04-29",v:8,p:"apr"},{m:"HSV",d:"2026-04-30",v:2,p:"apr"},
+  {m:"HSV",d:"2026-05-01",v:7,p:"may"},{m:"HSV",d:"2026-05-04",v:0,p:"may"},{m:"HSV",d:"2026-05-05",v:0,p:"may"},{m:"HSV",d:"2026-05-06",v:8,p:"may"},{m:"HSV",d:"2026-05-07",v:6,p:"may"},{m:"HSV",d:"2026-05-08",v:0,p:"may"},{m:"HSV",d:"2026-05-11",v:2,p:"may"},{m:"HSV",d:"2026-05-12",v:8,p:"may"},{m:"HSV",d:"2026-05-13",v:5,p:"may"},{m:"HSV",d:"2026-05-14",v:0,p:"may"},{m:"HSV",d:"2026-05-15",v:4,p:"may"},{m:"HSV",d:"2026-05-18",v:3,p:"may"},{m:"HSV",d:"2026-05-19",v:7,p:"may"},{m:"HSV",d:"2026-05-20",v:0,p:"may"},{m:"HSV",d:"2026-05-21",v:4,p:"may"},{m:"HSV",d:"2026-05-22",v:2,p:"may"},{m:"HSV",d:"2026-05-25",v:0,p:"may"},{m:"HSV",d:"2026-05-26",v:0,p:"may"},
+  {m:"SAT",d:"2026-04-01",v:26,p:"apr"},{m:"SAT",d:"2026-04-02",v:36,p:"apr"},{m:"SAT",d:"2026-04-03",v:35,p:"apr"},{m:"SAT",d:"2026-04-06",v:15,p:"apr"},{m:"SAT",d:"2026-04-07",v:32,p:"apr"},{m:"SAT",d:"2026-04-08",v:27,p:"apr"},{m:"SAT",d:"2026-04-09",v:34,p:"apr"},{m:"SAT",d:"2026-04-10",v:31,p:"apr"},{m:"SAT",d:"2026-04-13",v:20,p:"apr"},{m:"SAT",d:"2026-04-14",v:25,p:"apr"},{m:"SAT",d:"2026-04-15",v:34,p:"apr"},{m:"SAT",d:"2026-04-16",v:22,p:"apr"},{m:"SAT",d:"2026-04-17",v:31,p:"apr"},{m:"SAT",d:"2026-04-20",v:15,p:"apr"},{m:"SAT",d:"2026-04-21",v:5,p:"apr"},{m:"SAT",d:"2026-04-22",v:13,p:"apr"},{m:"SAT",d:"2026-04-23",v:11,p:"apr"},{m:"SAT",d:"2026-04-24",v:19,p:"apr"},{m:"SAT",d:"2026-04-27",v:13,p:"apr"},{m:"SAT",d:"2026-04-28",v:29,p:"apr"},{m:"SAT",d:"2026-04-29",v:31,p:"apr"},{m:"SAT",d:"2026-04-30",v:34,p:"apr"},
+  {m:"SAT",d:"2026-05-01",v:38,p:"may"},{m:"SAT",d:"2026-05-04",v:18,p:"may"},{m:"SAT",d:"2026-05-05",v:25,p:"may"},{m:"SAT",d:"2026-05-06",v:37,p:"may"},{m:"SAT",d:"2026-05-07",v:27,p:"may"},{m:"SAT",d:"2026-05-08",v:28,p:"may"},{m:"SAT",d:"2026-05-11",v:16,p:"may"},{m:"SAT",d:"2026-05-12",v:18,p:"may"},{m:"SAT",d:"2026-05-13",v:23,p:"may"},{m:"SAT",d:"2026-05-14",v:31,p:"may"},{m:"SAT",d:"2026-05-15",v:23,p:"may"},{m:"SAT",d:"2026-05-18",v:17,p:"may"},{m:"SAT",d:"2026-05-19",v:27,p:"may"},{m:"SAT",d:"2026-05-20",v:21,p:"may"},{m:"SAT",d:"2026-05-21",v:25,p:"may"},{m:"SAT",d:"2026-05-22",v:20,p:"may"},{m:"SAT",d:"2026-05-25",v:1,p:"may"},{m:"SAT",d:"2026-05-26",v:21,p:"may"}
+];
+
+const TARGETS = {BHM:{min:40,max:55},BNA:{min:15,max:25},DFW:{min:45,max:60},SAT:{min:30,max:45},HSV:{min:2,max:5}};
+const MARKETS = ['DFW','BHM','SAT','BNA','HSV'];
+const NORMS   = {BHM:{med:8,p25:7,p75h:5.0},BNA:{med:3,p25:2,p75h:7.0},DFW:{med:10,p25:8,p75h:5.3},SAT:{med:5,p25:4,p75h:5.7},HSV:{med:1,p25:1,p75h:6.8}};
+const COORDS  = {BHM:[33.5779,-86.7514],BNA:[36.1245,-86.6782],DFW:[32.8998,-97.0403],SAT:[29.5337,-98.4698],HSV:[34.6372,-86.7750]};
+const INVESTIGATE = {
+  DFW:'Board full, drivers present — check hauls/driver vs norm and dispatch queue',
+  BHM:'Active drivers below norm today — confirm full crew tomorrow',
+  SAT:'Board full but completion rate low — check dispatch and driver throughput',
+  BNA:'On target — monitor trend direction',
+  HSV:'Single-driver market — confirm driver availability'
+};
+const RAIN_MM = 2.54;
+const avg = a => a.length ? a.reduce((s,x)=>s+x,0)/a.length : 0;
+
+// ── Diagnose ─────────────────────────────────────────────────────────────────
+function diagnose(market) {
+  const t = TARGETS[market], n = NORMS[market];
+  const td = TODAY_DATA[market];
+  const may = RAW.filter(r=>r.m===market&&r.p==='may');
+  const mayAvg = avg(may.map(r=>r.v));
+  if (mayAvg >= t.min) return null;
+  const hpd = td.active_drivers > 0 ? td.productive_today / td.active_drivers : 0;
+  if (td.addressable_today < t.min)
+    return {verdict:'Sales gap',cls:'b-blue',reason:`Board thin — only ${td.addressable_today} addressable vs target min ${t.min}. Need more work scheduled.`};
+  if (td.active_drivers <= n.p25)
+    return {verdict:'Driver gap',cls:'b-amber',reason:`${td.active_drivers} drivers active vs norm floor ${n.p25}. Below normal staffing.`};
+  if (hpd >= n.p75h)
+    return {verdict:'Capacity ceiling',cls:'b-blue',reason:`${hpd.toFixed(1)} hauls/driver at ceiling (p75: ${n.p75h}). Need more trucks/drivers.`};
+  return {verdict:'Throughput gap',cls:'b-orange',reason:`Board full (${td.addressable_today}), ${td.active_drivers} drivers, but ${hpd.toFixed(1)} hauls/driver. Dispatch or completion rate issue.`};
+}
+
+// ── Rain fetch ────────────────────────────────────────────────────────────────
+async function fetchRain(market) {
+  const [lat,lng] = COORDS[market];
+  const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=2026-04-01&end_date=${SNAPSHOT_DATE}&timezone=America%2FChicago`;
+  try {
+    const r = await fetch(url); const j = await r.json();
+    const m = {}; j.daily.time.forEach((d,i)=>{ m[d]=j.daily.precipitation_sum[i]||0; }); return m;
+  } catch(e){ return {}; }
+}
+
+// ── Platform header ───────────────────────────────────────────────────────────
+function renderHeader() {
+  const totalToday = Object.values(TODAY_DATA).reduce((s,d)=>s+d.productive_today,0);
+  const totalAddr  = Object.values(TODAY_DATA).reduce((s,d)=>s+d.addressable_today,0);
+  const platMay    = avg(MARKETS.map(m => avg(RAW.filter(r=>r.m===m&&r.p==='may').map(r=>r.v))));
+  const platApr    = avg(MARKETS.map(m => avg(RAW.filter(r=>r.m===m&&r.p==='apr').map(r=>r.v))));
+  document.getElementById('plat-num').textContent = totalToday;
+  document.getElementById('plat-sub').textContent = `${totalAddr} addressable today · May MTD avg ${platMay.toFixed(0)}/day`;
+  document.getElementById('plat-row').innerHTML =
+    `<div class="pstat">Apr avg <strong>${platApr.toFixed(0)}</strong></div>
+     <div class="pstat">May MTD avg <strong>${platMay.toFixed(0)}</strong></div>
+     <div class="pstat">Target <strong>${Object.values(TARGETS).reduce((s,t)=>s+t.min,0)}–${Object.values(TARGETS).reduce((s,t)=>s+t.max,0)}</strong></div>`;
+  const d = new Date(SNAPSHOT_DATE+'T00:00:00');
+  document.getElementById('footer').textContent =
+    `IW Ops Dashboard · ${d.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})} · Data via IW DB`;
+}
+
+// ── Build card ────────────────────────────────────────────────────────────────
+function buildCard(market, rainMap) {
+  const t   = TARGETS[market];
+  const td  = TODAY_DATA[market];
+  const apr = RAW.filter(r=>r.m===market&&r.p==='apr');
+  const may = RAW.filter(r=>r.m===market&&r.p==='may');
+  const aprAvg = avg(apr.map(r=>r.v));
+  const mayAvg = avg(may.map(r=>r.v));
+  const delta  = mayAvg - aprAvg;
+  const dStr   = (delta>=0?'+':'')+Math.round(delta);
+  const dCls   = delta>1?'up':delta<-1?'dn':'flat';
+  const onTgt  = mayAvg >= t.min;
+  const dx     = diagnose(market);
+  const missPct= Math.round(may.filter(r=>r.v<t.min).length/may.length*100);
+
+  const badgeHtml = onTgt
+    ? `<span class="badge b-green">On target</span>`
+    : `<span class="badge ${dx.cls}">${dx.verdict}</span>`;
+
+  const verdictHtml = (!onTgt && dx) ? `
+    <div class="verdict">${dx.reason}</div>
+    <div class="vstats">
+      <div class="vstat"><strong>${td.productive_today}</strong>Today</div>
+      <div class="vstat"><strong>${td.active_drivers}</strong>Drivers</div>
+      <div class="vstat"><strong>${missPct}%</strong>Below min MTD</div>
+    </div>` : '';
+
+  const allRows   = [...apr,...may];
+  const splitIdx  = apr.length;
+  const rainDates = new Set(allRows.map(r=>r.d).filter(d=>(rainMap[d]||0)>=RAIN_MM));
+
+  const div = document.createElement('div');
+  div.className = 'card';
+  div.innerHTML = `
+    <div class="card-top"><span class="card-mkt">${market}</span><span class="card-tgt">target ${t.min}–${t.max}</span></div>
+    <div class="card-main"><span class="card-num">${Math.round(mayAvg)}</span><span class="card-delta ${dCls}">${dStr} vs Apr</span></div>
+    <div class="card-periods"><span>Apr avg <strong>${Math.round(aprAvg)}</strong></span><span>May MTD avg <strong>${Math.round(mayAvg)}</strong></span></div>
+    <div>${badgeHtml}</div>
+    ${verdictHtml}
+    <div class="chart-wrap"><canvas id="c-${market}" role="img" aria-label="${market} haul trend"></canvas></div>
+    <div class="legend">
+      <span><span class="leg-line" style="background:#ccc"></span>Apr</span>
+      <span><span class="leg-line" style="background:#1b1c51"></span>May MTD</span>
+      <span><span class="leg-band" style="background:rgba(0,167,117,.15);border:1px solid rgba(0,167,117,.4)"></span>Target</span>
+      <span><span class="leg-dot" style="background:#4a90d9"></span>Rain</span>
+    </div>`;
+  document.getElementById('cards').appendChild(div);
+
+  requestAnimationFrame(()=>{
+    const ctx = document.getElementById('c-'+market);
+    if(!ctx) return;
+    new Chart(ctx,{
+      type:'line',
+      data:{
+        labels: allRows.map(r=>r.d.slice(5)),
+        datasets:[
+          {data:allRows.map(()=>t.max),borderColor:'transparent',backgroundColor:'rgba(0,167,117,.12)',fill:'+1',pointRadius:0,tension:0},
+          {data:allRows.map(()=>t.min),borderColor:'rgba(0,167,117,.35)',borderWidth:1,borderDash:[3,3],backgroundColor:'transparent',fill:false,pointRadius:0,tension:0},
+          {data:allRows.map((r,i)=>i<splitIdx?r.v:null),borderColor:'#ccc',borderWidth:1.5,fill:false,
+           pointRadius:allRows.map((r,i)=>i<splitIdx&&rainDates.has(r.d)?4:0),
+           pointBackgroundColor:allRows.map((r,i)=>i<splitIdx&&rainDates.has(r.d)?'#4a90d9':'transparent'),
+           pointBorderColor:'transparent',tension:0.25,spanGaps:false},
+          {data:allRows.map((r,i)=>i>=splitIdx?r.v:null),borderColor:'#1b1c51',borderWidth:2,fill:false,
+           pointRadius:allRows.map((r,i)=>i>=splitIdx&&rainDates.has(r.d)?4:0),
+           pointBackgroundColor:allRows.map((r,i)=>i>=splitIdx&&rainDates.has(r.d)?'#4a90d9':'transparent'),
+           pointBorderColor:'transparent',tension:0.25,spanGaps:false}
+        ]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>{
+          const r=allRows[ctx.dataIndex];
+          const mm=rainMap[r?.d]||0;
+          return `${ctx.parsed.y} hauls${mm>=RAIN_MM?' 🌧 '+(mm/25.4).toFixed(2)+'"':''}`;
+        }}}},
+        scales:{x:{display:false},y:{display:false,min:0,max:Math.max(t.max*1.4,Math.max(...allRows.map(r=>r.v))*1.15)}},
+        animation:false
+      }
+    });
+  });
+}
+
+// ── Action table ──────────────────────────────────────────────────────────────
+function renderAction() {
+  const rows = MARKETS
+    .map(m => {
+      const may=RAW.filter(r=>r.m===m&&r.p==='may');
+      const mayAvg=avg(may.map(r=>r.v));
+      const t=TARGETS[m];
+      const missPct=Math.round(may.filter(r=>r.v<t.min).length/may.length*100);
+      const dx=diagnose(m);
+      return {m,mayAvg,t,missPct,dx,onTgt:mayAvg>=t.min};
+    })
+    .filter(r=>!r.onTgt)
+    .sort((a,b)=>b.missPct-a.missPct);
+
+  const tbody = document.getElementById('action-body');
+  if (!rows.length) {
+    tbody.innerHTML='<tr><td colspan="4" style="color:#aaa;padding:12px 0">All markets on target</td></tr>';
+    return;
+  }
+  rows.forEach(({m,missPct,dx})=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`
+      <td style="font-weight:600">${m}</td>
+      <td><span class="badge ${dx.cls}" style="margin:0">${dx.verdict}</span></td>
+      <td><div class="bar-wrap"><div class="bar-bg"><div class="bar-fill" style="width:${missPct}%"></div></div><span style="font-size:12px;color:#888">${missPct}% of days</span></div></td>
+      <td style="font-size:12px;color:#888">${INVESTIGATE[m]}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  renderHeader();
+  renderAction();
+  const rainMaps = {};
+  await Promise.all(MARKETS.map(async m=>{ rainMaps[m]=await fetchRain(m); }));
+  MARKETS.forEach(m=>buildCard(m,rainMaps[m]));
+}
+
+init();
+</script>
+</body>
+</html>
