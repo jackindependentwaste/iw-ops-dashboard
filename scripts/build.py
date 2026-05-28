@@ -55,15 +55,25 @@ IW Brand: navy #1b1c51, orange #f26a21, green #00a775, bone background #f5f3ef
 The dashboard must include:
 - Platform header: total productive hauls today, total addressable, May MTD avg
 - One card per market: today's hauls, addressable, MTD avg, target, active drivers, verdict badge, mini trend chart (Chart.js CDN)
-- Rain dots on trend chart via Open-Meteo archive API fetched live in the browser:
-  https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date=2026-04-01&end_date={today}&timezone=America%2FChicago
-  Coords: BHM(33.5779,-86.7514), BNA(36.1245,-86.6782), DFW(32.8998,-97.0403), SAT(29.5337,-98.4698), HSV(34.6372,-86.7750)
-  Rain threshold: 2.54mm — blue dot on trend line
 - Action plan table: off-target markets ranked by MTD miss %, with verdict and investigate note
 - Footer with today's date
 
+CHART REQUIREMENTS - follow exactly:
+1. WEEKENDS: exclude weekend dates from the chart entirely UNLESS productive_hauls > 0 on that day.
+2. TWO LINE COLORS: April data uses color #b4b2a9 (gray). May MTD data uses color #1b1c51 (navy). These must be separate Chart.js datasets on the same chart.
+3. TARGET BAND: render as a filled green band between target_min and target_max. Use backgroundColor 'rgba(0,167,117,0.13)' for the fill. Use a dashed borderColor 'rgba(0,167,117,0.4)' on the min line. This must appear as a visible shaded region.
+4. RAIN DOTS: fetch live from Open-Meteo archive API in the browser. Show as blue (#4a90d9) filled circle points with pointRadius 4 on days where precipitation_sum >= 2.54mm. All other points have pointRadius 0.
+   API: https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date=2026-04-01&end_date={today}&timezone=America/Chicago
+   Coords: BHM(33.5779,-86.7514), BNA(36.1245,-86.6782), DFW(32.8998,-97.0403), SAT(29.5337,-98.4698), HSV(34.6372,-86.7750)
+
+Chart.js dataset order must be:
+  [0] band top line (target_max values, fill '+1' to next dataset, backgroundColor 'rgba(0,167,117,0.13)', borderColor 'transparent', pointRadius 0)
+  [1] band bottom line (target_min values, borderColor 'rgba(0,167,117,0.4)', borderDash [3,3], fill false, pointRadius 0)
+  [2] April haul data (borderColor '#b4b2a9', borderWidth 1.5, fill false, pointRadius per rain logic, spanGaps false)
+  [3] May MTD haul data (borderColor '#1b1c51', borderWidth 2, fill false, pointRadius per rain logic, spanGaps false)
+
 April + May MTD daily haul data must be queried from the DB and baked into the HTML as a JS const.
-Open-Meteo is fetched live from the browser — no DB calls from the browser.
+Open-Meteo is fetched live from the browser - no DB calls from the browser.
 
 Output ONLY the HTML. Nothing else."""
 
