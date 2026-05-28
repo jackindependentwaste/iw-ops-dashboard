@@ -87,7 +87,7 @@ def call_claude() -> str:
     print("Calling Claude API with Supabase MCP...")
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    response = client.messages.create(
+    response = client.beta.messages.create(
         model=MODEL,
         max_tokens=8000,
         system=SYSTEM_PROMPT,
@@ -99,6 +99,7 @@ def call_claude() -> str:
                 "name": "iw-db",
             }
         ],
+        betas=["mcp-client-2025-04-04"],
     )
 
     html_output = ""
