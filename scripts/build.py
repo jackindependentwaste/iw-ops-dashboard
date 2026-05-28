@@ -19,7 +19,8 @@ VERCEL_TOKEN      = os.environ["VERCEL_TOKEN"]
 VERCEL_PROJECT    = "iw-ops-dashboard"
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 
-SUPABASE_MCP_URL  = "https://mcp.supabase.com/mcp"
+SUPABASE_MCP_URL      = "https://mcp.supabase.com/mcp"
+SUPABASE_ACCESS_TOKEN = os.environ["SUPABASE_ACCESS_TOKEN"]
 MODEL             = "claude-sonnet-4-5"
 OUTPUT_PATH       = "public/index.html"
 
@@ -95,6 +96,7 @@ def call_claude() -> str:
         mcp_servers=[
             {
                 "type": "url",
+                "authorization_token": SUPABASE_ACCESS_TOKEN,
                 "url": SUPABASE_MCP_URL,
                 "name": "iw-db",
             }
