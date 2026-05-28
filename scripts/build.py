@@ -20,7 +20,7 @@ VERCEL_PROJECT    = "iw-ops-dashboard"
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 
 SUPABASE_MCP_URL  = "https://mcp.supabase.com/mcp"
-MODEL             = "claude-sonnet-4-20250514"
+MODEL             = "claude-sonnet-4-5"
 OUTPUT_PATH       = "public/index.html"
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
