@@ -98,21 +98,36 @@ def call_claude() -> str:
     print("Calling Claude API with Supabase MCP...")
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    response = client.beta.messages.create(
-        model=MODEL,
-        max_tokens=8000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_user_prompt()}],
-        mcp_servers=[
-            {
-                "type": "url",
-                "authorization_token": SUPABASE_ACCESS_TOKEN,
-                "url": SUPABASE_MCP_URL,
-                "name": "iw-db",
-            }
-        ],
-        betas=["mcp-client-2025-04-04"],
-    )
+    max_retries = 5
+    retry_delay = 60  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            response = client.beta.messages.create(
+                model=MODEL,
+                max_tokens=8000,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": build_user_prompt()}],
+                mcp_servers=[
+                    {
+                        "type": "url",
+                        "authorization_token": SUPABASE_ACCESS_TOKEN,
+                        "url": SUPABASE_MCP_URL,
+                        "name": "iw-db",
+                    }
+                ],
+                betas=["mcp-client-2025-04-04"],
+            )
+            break  # success — exit retry loop
+
+        except anthropic.RateLimitError as e:
+            if attempt < max_retries - 1:
+                wait = retry_delay * (attempt + 1)
+                print(f"Rate limit hit (attempt {attempt + 1}/{max_retries}). Waiting {wait}s...")
+                import time
+                time.sleep(wait)
+            else:
+                raise e
 
     html_output = ""
     for block in response.content:
