@@ -99,7 +99,7 @@ def call_claude() -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     max_retries = 5
-    retry_delay = 60  # seconds
+    retry_delay = 30  # seconds
 
     for attempt in range(max_retries):
         try:
