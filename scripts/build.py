@@ -1,133 +1,312 @@
 """
 IW Ops Dashboard — Nightly Build Script
-Calls Claude via Anthropic API with Supabase MCP attached to:
-  1. Query the IW DB for today's haul metrics
-  2. Generate a complete self-contained HTML dashboard
-Then deploys to Vercel and pings Slack.
+1. Queries Supabase REST API directly for all haul data
+2. Passes data to Claude API to generate HTML dashboard
+3. Deploys to Vercel
+4. Pings Slack
 """
 
 import os
 import sys
 import json
+import time
 import requests
 import anthropic
-from datetime import datetime, timezone
 import zoneinfo
+from datetime import datetime, timedelta, timezone
 
 # ── Config ────────────────────────────────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-VERCEL_TOKEN      = os.environ["VERCEL_TOKEN"]
-VERCEL_PROJECT    = "iw-ops-dashboard"
-SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
+ANTHROPIC_API_KEY   = os.environ["ANTHROPIC_API_KEY"]
+VERCEL_TOKEN        = os.environ["VERCEL_TOKEN"]
+VERCEL_PROJECT      = "iw-ops-dashboard"
+SLACK_WEBHOOK_URL   = os.environ["SLACK_WEBHOOK_URL"]
+SUPABASE_URL        = "https://gusggxvsgnggxmgmmtve.supabase.co"
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-SUPABASE_MCP_URL      = "https://mcp.supabase.com/mcp"
-SUPABASE_ACCESS_TOKEN = os.environ["SUPABASE_ACCESS_TOKEN"]
-MODEL             = "claude-sonnet-4-5"
-OUTPUT_PATH       = "public/index.html"
+MODEL       = "claude-sonnet-4-5"
+OUTPUT_PATH = "public/index.html"
+CT          = zoneinfo.ZoneInfo("America/Chicago")
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are a data pipeline that generates an HTML ops dashboard for Independent Waste (IW).
+TARGETS = {
+    "BHM": {"min": 40, "max": 55},
+    "BNA": {"min": 15, "max": 25},
+    "DFW": {"min": 45, "max": 60},
+    "SAT": {"min": 30, "max": 45},
+    "HSV": {"min": 2,  "max": 5},
+}
 
-You have access to the IW Supabase database via MCP tools. Query it to get today's metrics,
-then output ONLY a complete, self-contained HTML file — no explanation, no markdown fences,
-just raw HTML starting with <!DOCTYPE html>.
+MARKET_IDS = {"BHM": 36, "BNA": 34, "DFW": 40, "SAT": 37, "HSV": 39}
 
-Key schema facts:
-- Market IDs: BHM=36, BNA=34, DFW=40, SAT=37, HSV=39
-- Always join orders → projects → markets (do not filter on orders.market_id directly)
-- Soft deletes: filter deleted_at IS NULL
-- Timestamps are UTC; convert to America/Chicago for all date logic
-- Productive hauls: status='completed' OR status='billed' OR (status='canceled' AND driver_id IS NOT NULL)
-- Active drivers: COUNT(DISTINCT driver_id) on completed orders today
-- Addressable today: orders where started_at <= NOW() AND (still open OR completed/billed/dry-run today)
+NORMS = {
+    "BHM": {"median_drivers": 8, "p25_drivers": 7, "p75_hauls_per": 5.0},
+    "BNA": {"median_drivers": 3, "p25_drivers": 2, "p75_hauls_per": 7.0},
+    "DFW": {"median_drivers": 10,"p25_drivers": 8, "p75_hauls_per": 5.3},
+    "SAT": {"median_drivers": 5, "p25_drivers": 4, "p75_hauls_per": 5.7},
+    "HSV": {"median_drivers": 1, "p25_drivers": 1, "p75_hauls_per": 6.8},
+}
 
-Targets: BHM 40-55, BNA 15-25, DFW 45-60, SAT 30-45, HSV 2-5
+# ── Supabase REST query ───────────────────────────────────────────────────────
+def supabase_rpc(sql: str) -> list:
+    """Run a raw SQL query via Supabase REST API."""
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/execute_sql",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"query": sql},
+        timeout=30,
+    )
+    if not resp.ok:
+        # Fallback: try pg endpoint
+        print(f"RPC failed ({resp.status_code}), trying pg endpoint...")
+        raise Exception(f"Supabase query failed: {resp.status_code} {resp.text[:200]}")
+    return resp.json()
 
-Verdict logic (check in order, use first that trips):
-1. Sales gap: addressable_today < target_min
-2. Driver gap: active_drivers_today <= p25_drivers_norm (BHM<=7, BNA<=2, DFW<=8, SAT<=4, HSV<=1)
-3. Capacity ceiling: hauls_per_driver >= p75_norm (BHM>=5.0, BNA>=7.0, DFW>=5.3, SAT>=5.7, HSV>=6.8)
-4. Throughput gap: default
 
-Trailing 60-day norms: BHM median 8 drivers, BNA 3, DFW 10, SAT 5, HSV 1
+def supabase_query(sql: str) -> list:
+    """Query via Supabase SQL endpoint."""
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/query",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+        json={"sql": sql},
+        timeout=30,
+    )
+    if resp.ok:
+        return resp.json()
+    raise Exception(f"Query failed: {resp.status_code} {resp.text[:300]}")
 
-IW Brand: navy #1b1c51, orange #f26a21, green #00a775, bone background #f5f3ef
+
+def run_sql(sql: str) -> list:
+    """Try multiple Supabase SQL execution methods."""
+    # Method 1: pg_meta
+    resp = requests.post(
+        f"{SUPABASE_URL}/pg/query",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"query": sql},
+        timeout=30,
+    )
+    if resp.ok:
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        if "rows" in data:
+            return data["rows"]
+
+    # Method 2: direct REST with PostgREST RPC
+    resp2 = requests.post(
+        f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
+        headers={
+            "apikey": SUPABASE_SERVICE_KEY,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"sql_query": sql},
+        timeout=30,
+    )
+    if resp2.ok:
+        return resp2.json()
+
+    raise Exception(f"All SQL methods failed. Last: {resp2.status_code} {resp2.text[:300]}")
+
+
+# ── Fetch data ────────────────────────────────────────────────────────────────
+def fetch_data() -> dict:
+    today_ct = datetime.now(CT).date()
+    month_start = today_ct.replace(day=1)
+    trend_start = "2026-04-01"
+
+    print(f"Fetching data for {today_ct} CT...")
+
+    # Daily hauls per market from April 1 through today
+    # Weekend hauls rolled into preceding Friday
+    daily_sql = f"""
+    WITH daily AS (
+      SELECT
+        m.name AS market,
+        DATE(o.completed_at AT TIME ZONE 'America/Chicago') AS haul_date,
+        EXTRACT(DOW FROM o.completed_at AT TIME ZONE 'America/Chicago') AS dow,
+        COUNT(*) AS hauls
+      FROM orders o
+      JOIN projects p ON p.id = o.project_id
+      JOIN markets m ON m.id = p.market_id
+      WHERE o.deleted_at IS NULL
+        AND (o.status IN ('completed','billed') OR (o.status = 'canceled' AND o.driver_id IS NOT NULL))
+        AND o.completed_at AT TIME ZONE 'America/Chicago' >= '{trend_start}'
+        AND o.completed_at AT TIME ZONE 'America/Chicago' < '{today_ct + timedelta(days=1)}'
+        AND m.name IN ('BHM','BNA','DFW','SAT','HSV')
+      GROUP BY 1, 2, 3
+    )
+    SELECT
+      market,
+      CASE
+        WHEN dow = 0 THEN haul_date - INTERVAL '2 days'  -- Sunday → Friday
+        WHEN dow = 6 THEN haul_date - INTERVAL '1 day'   -- Saturday → Friday
+        ELSE haul_date
+      END AS plot_date,
+      SUM(hauls) AS productive_hauls
+    FROM daily
+    GROUP BY 1, 2
+    ORDER BY 1, 2
+    """
+
+    # Today's summary per market
+    today_sql = f"""
+    SELECT
+      m.name AS market,
+      COUNT(*) FILTER (WHERE o.status IN ('completed','billed') OR (o.status = 'canceled' AND o.driver_id IS NOT NULL)) AS productive_today,
+      COUNT(DISTINCT o.driver_id) FILTER (WHERE o.status IN ('completed','billed')) AS active_drivers,
+      COUNT(*) FILTER (WHERE o.status IN ('available','assigned','progress','paused')
+        OR (o.status IN ('completed','billed') AND DATE(o.completed_at AT TIME ZONE 'America/Chicago') = '{today_ct}')
+        OR (o.status = 'canceled' AND o.driver_id IS NOT NULL AND DATE(o.completed_at AT TIME ZONE 'America/Chicago') = '{today_ct}')
+      ) AS addressable_today
+    FROM orders o
+    JOIN projects p ON p.id = o.project_id
+    JOIN markets m ON m.id = p.market_id
+    WHERE o.deleted_at IS NULL
+      AND m.name IN ('BHM','BNA','DFW','SAT','HSV')
+      AND (
+        (DATE(o.completed_at AT TIME ZONE 'America/Chicago') = '{today_ct}')
+        OR (o.status IN ('available','assigned','progress','paused') AND o.started_at <= NOW())
+      )
+    GROUP BY m.name
+    """
+
+    # MTD avg per market
+    mtd_sql = f"""
+    SELECT
+      m.name AS market,
+      ROUND(AVG(daily_hauls)::numeric, 1) AS mtd_avg
+    FROM (
+      SELECT
+        m.name,
+        DATE(o.completed_at AT TIME ZONE 'America/Chicago') AS day,
+        COUNT(*) AS daily_hauls
+      FROM orders o
+      JOIN projects p ON p.id = o.project_id
+      JOIN markets m ON m.id = p.market_id
+      WHERE o.deleted_at IS NULL
+        AND (o.status IN ('completed','billed') OR (o.status = 'canceled' AND o.driver_id IS NOT NULL))
+        AND DATE(o.completed_at AT TIME ZONE 'America/Chicago') >= '{month_start}'
+        AND DATE(o.completed_at AT TIME ZONE 'America/Chicago') <= '{today_ct}'
+        AND EXTRACT(DOW FROM o.completed_at AT TIME ZONE 'America/Chicago') NOT IN (0,6)
+        AND m.name IN ('BHM','BNA','DFW','SAT','HSV')
+      GROUP BY 1, 2
+    ) d
+    JOIN markets m ON m.name = d.name
+    GROUP BY m.name
+    """
+
+    try:
+        daily_rows  = run_sql(daily_sql)
+        today_rows  = run_sql(today_sql)
+        mtd_rows    = run_sql(mtd_sql)
+    except Exception as e:
+        print(f"DB query error: {e}")
+        raise
+
+    return {
+        "today": str(today_ct),
+        "daily_rows": daily_rows,
+        "today_rows": today_rows,
+        "mtd_rows": mtd_rows,
+        "targets": TARGETS,
+        "norms": NORMS,
+    }
+
+
+# ── System prompt ─────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are a dashboard generator for Independent Waste (IW), a roll-off waste hauler.
+
+You will receive pre-fetched data as JSON. Generate a complete, self-contained HTML dashboard.
+Output ONLY raw HTML starting with <!DOCTYPE html> — no explanation, no markdown fences.
+
+IW Brand colors: navy #1b1c51, orange #f26a21, green #00a775, bone background #f5f3ef
+Font: system-ui, sans-serif
 
 The dashboard must include:
-- Platform header: total productive hauls today, total addressable, May MTD avg
-- One card per market: today's hauls, addressable, MTD avg, target, active drivers, verdict badge, mini trend chart (Chart.js CDN)
-- Action plan table: off-target markets ranked by MTD miss %, with verdict and investigate note
-- Footer with today's date
+- Platform header: total productive hauls today across all markets, total addressable, MTD avg
+- One card per market (DFW, BHM, SAT, BNA, HSV order): today hauls, addressable, MTD avg, target range, active drivers, verdict badge
+- Action plan table: off-target markets ranked by MTD miss %, verdict, investigate note
+- Footer: "IW Ops Dashboard · {date} · Data via IW DB"
 
-CHART REQUIREMENTS - follow exactly:
-0. STABILITY: Chart.js must be loaded from CDN before any chart code runs. All chart initialization must be inside a DOMContentLoaded event listener or called after the DOM is fully loaded. Use requestAnimationFrame only after DOMContentLoaded fires. Never initialize charts inline in the body.
-1. WEEKENDS: when querying the DB, add any Saturday/Sunday hauls to the preceding Friday's total. Do not plot Saturday or Sunday as separate data points. The chart x-axis should only contain business days (Mon–Fri).
-2. DAILY LINE: all daily haul data (both April and May MTD) must use a single light gray color #d0ceca, borderWidth 1.5. This is the raw daily line showing volatility.
-3. TREND LINE: compute a 5-business-day rolling average over the combined April+May dataset. Plot this as a single dark navy line (#1b1c51, borderWidth 2.5, tension 0.4). This overlays the gray daily line and shows the smoothed direction. The rolling average at index i = average of values at i-4 through i (or fewer if near the start).
-4. TARGET BAND: render as a filled green band between target_min and target_max. Use backgroundColor 'rgba(0,167,117,0.13)' for the fill. Use a dashed borderColor 'rgba(0,167,117,0.4)' on the min line. This must appear as a visible shaded region.
-5. RAIN DOTS: fetch live from Open-Meteo archive API in the browser. Show as blue (#4a90d9) filled circle points with pointRadius 4 on the daily gray line on days where precipitation_sum >= 2.54mm. All other points have pointRadius 0.
-   API: https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date=2026-04-01&end_date={today}&timezone=America/Chicago
-   Coords: BHM(33.5779,-86.7514), BNA(36.1245,-86.6782), DFW(32.8998,-97.0403), SAT(29.5337,-98.4698), HSV(34.6372,-86.7750)
+VERDICT LOGIC (check in order, first that trips wins):
+1. Sales gap: addressable_today < target_min
+2. Driver gap: active_drivers <= p25_drivers from norms
+3. Capacity ceiling: (productive_today / active_drivers) >= p75_hauls_per from norms
+4. Throughput gap: default if board full and drivers present but still missing target
+If on target: show green "On target" badge
 
-Chart.js dataset order must be:
-  [0] band top line (target_max values, fill '+1', backgroundColor 'rgba(0,167,117,0.13)', borderColor 'transparent', pointRadius 0)
-  [1] band bottom line (target_min values, borderColor 'rgba(0,167,117,0.4)', borderDash [3,3], fill false, pointRadius 0)
-  [2] daily haul line (borderColor '#d0ceca', borderWidth 1.5, fill false, pointRadius per rain logic, spanGaps false) — covers full April+May range
-  [3] 5-business-day rolling average (borderColor '#1b1c51', borderWidth 2.5, fill false, pointRadius 0, tension 0.4, spanGaps false)
+CHART REQUIREMENTS:
+- Use Chart.js from https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js
+- All chart initialization inside window.addEventListener('load', ...) — never inline
+- One mini chart per card, height 72px
+- X-axis: business days only (Mon-Fri), no weekend dates unless hauls > 0
+- Dataset order in Chart.js:
+  [0] Target band top (target_max, fill '+1', backgroundColor 'rgba(0,167,117,0.13)', borderColor 'transparent', pointRadius 0)
+  [1] Target band bottom (target_min, borderDash [3,3], borderColor 'rgba(0,167,117,0.35)', fill false, pointRadius 0)
+  [2] Daily hauls line (borderColor '#d0ceca', borderWidth 1.5, fill false, pointRadius 0 except rain dots which are blue #4a90d9 pointRadius 4, spanGaps false)
+  [3] 5-business-day rolling average (borderColor '#1b1c51', borderWidth 2.5, tension 0.4, fill false, pointRadius 0)
+- Rolling average: for each index i, average of up to 5 preceding values including i
+- Rain dots: fetch Open-Meteo live in browser for each market, mark days >= 2.54mm precipitation
+  URL: https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date=2026-04-01&end_date={today}&timezone=America/Chicago
+  Coords: BHM(33.5779,-86.7514), BNA(36.1245,-86.6782), DFW(32.8998,-97.0403), SAT(29.5337,-98.4698), HSV(34.6372,-86.7750)
 
-April + May MTD daily haul data must be queried from the DB and baked into the HTML as a JS const.
-Open-Meteo is fetched live from the browser - no DB calls from the browser.
+Bake all haul data into the HTML as JS constants. Open-Meteo fetched live from browser only.
 
 Output ONLY the HTML. Nothing else."""
 
 
-def build_user_prompt():
-    today = datetime.now(zoneinfo.ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
-    return f"""Today is {today}.
+def build_user_prompt(data: dict) -> str:
+    return f"""Today is {data['today']} (Central Time).
 
-Please:
-1. Query the IW database for:
-   - Today's productive hauls, addressable capacity, and active drivers per market
-   - Daily productive hauls per market from April 1 through today (for trend charts)
-   - May MTD average per market
+Here is the pre-fetched data from the IW database:
 
-2. Generate the complete dashboard HTML with all data baked in.
+DAILY HAULS (April 1 through today, weekends rolled into preceding Friday):
+{json.dumps(data['daily_rows'], indent=2)}
 
-Output ONLY the raw HTML file, starting with <!DOCTYPE html>."""
+TODAY'S SUMMARY PER MARKET:
+{json.dumps(data['today_rows'], indent=2)}
+
+MTD AVERAGE PER MARKET:
+{json.dumps(data['mtd_rows'], indent=2)}
+
+TARGETS: {json.dumps(data['targets'])}
+
+60-DAY TRAILING NORMS: {json.dumps(data['norms'])}
+
+Generate the complete dashboard HTML now. Output ONLY raw HTML starting with <!DOCTYPE html>."""
 
 
 # ── Call Claude ───────────────────────────────────────────────────────────────
-def call_claude() -> str:
-    print("Calling Claude API with Supabase MCP...")
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+def call_claude(data: dict) -> str:
+    print("Calling Claude API...")
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=300.0)
 
-    max_retries = 5
-    retry_delay = 30  # seconds
-
+    max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = client.beta.messages.create(
+            response = client.messages.create(
                 model=MODEL,
-                max_tokens=8000,
+                max_tokens=16000,
                 system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": build_user_prompt()}],
-                mcp_servers=[
-                    {
-                        "type": "url",
-                        "authorization_token": SUPABASE_ACCESS_TOKEN,
-                        "url": SUPABASE_MCP_URL,
-                        "name": "iw-db",
-                    }
-                ],
-                betas=["mcp-client-2025-04-04"],
+                messages=[{"role": "user", "content": build_user_prompt(data)}],
             )
-            break  # success — exit retry loop
-
+            break
         except anthropic.RateLimitError as e:
             if attempt < max_retries - 1:
-                wait = retry_delay * (attempt + 1)
-                print(f"Rate limit hit (attempt {attempt + 1}/{max_retries}). Waiting {wait}s...")
-                import time
+                wait = 30 * (attempt + 1)
+                print(f"Rate limit, waiting {wait}s...")
                 time.sleep(wait)
             else:
                 raise e
@@ -137,7 +316,6 @@ def call_claude() -> str:
         if hasattr(block, "text"):
             html_output += block.text
 
-    # Strip any accidental markdown fences
     start = html_output.find("<!DOCTYPE")
     if start == -1:
         start = html_output.find("<html")
@@ -145,7 +323,7 @@ def call_claude() -> str:
         html_output = html_output[start:]
 
     if not html_output.strip():
-        raise ValueError("Claude returned empty HTML output")
+        raise ValueError("Claude returned empty output")
 
     print(f"Generated HTML: {len(html_output):,} chars")
     return html_output
@@ -160,139 +338,108 @@ def write_html(html: str):
 
 
 # ── Deploy to Vercel ──────────────────────────────────────────────────────────
-def get_vercel_project_id() -> str:
-    """Look up the Vercel project ID by name so we can deploy to it consistently."""
+def get_static_url() -> str:
     resp = requests.get(
         f"https://api.vercel.com/v9/projects/{VERCEL_PROJECT}",
         headers={"Authorization": f"Bearer {VERCEL_TOKEN}"},
-        timeout=30
+        timeout=30,
     )
     if resp.ok:
         data = resp.json()
-        project_id = data.get("id")
-        # Get the stable production alias (custom domain or .vercel.app)
-        alias = None
         for a in data.get("alias", []):
-            if a.get("domain", "").endswith(".vercel.app") and "-" not in a.get("domain","").replace(VERCEL_PROJECT,""):
-                alias = a.get("domain")
-                break
-        if not alias:
-            # fallback: use the project name .vercel.app
-            alias = f"{VERCEL_PROJECT}.vercel.app"
-        return project_id, f"https://{alias}"
-    return None, f"https://{VERCEL_PROJECT}.vercel.app"
+            domain = a.get("domain", "")
+            if domain.endswith(".vercel.app") and "preview" not in domain:
+                return f"https://{domain}"
+    return f"https://{VERCEL_PROJECT}.vercel.app"
 
 
 def deploy_to_vercel(html: str) -> str:
     print("Deploying to Vercel...")
-
-    project_id, static_url = get_vercel_project_id()
-    print(f"Project: {VERCEL_PROJECT} → static URL: {static_url}")
-
-    payload = {
-        "name": VERCEL_PROJECT,
-        "files": [
-            {
-                "file": "index.html",
-                "data": html,
-                "encoding": "utf-8"
-            }
-        ],
-        "projectSettings": {
-            "framework": None,
-            "outputDirectory": None,
-            "buildCommand": None,
-            "installCommand": None
-        },
-        "target": "production"
-    }
-
-    if project_id:
-        payload["project"] = project_id
+    static_url = get_static_url()
+    print(f"Static URL: {static_url}")
 
     resp = requests.post(
         "https://api.vercel.com/v13/deployments",
         headers={
             "Authorization": f"Bearer {VERCEL_TOKEN}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         },
-        json=payload,
-        timeout=60
+        json={
+            "name": VERCEL_PROJECT,
+            "files": [{"file": "index.html", "data": html, "encoding": "utf-8"}],
+            "projectSettings": {"framework": None},
+            "target": "production",
+        },
+        timeout=60,
     )
 
     if not resp.ok:
-        print(f"Vercel error: {resp.status_code} — {resp.text}")
+        print(f"Vercel error: {resp.status_code} — {resp.text[:300]}")
         resp.raise_for_status()
 
-    deploy = resp.json()
-    print(f"Deploy created: {deploy.get('url')}")
-    # Always return the static production URL, not the per-deploy preview URL
+    print(f"Deploy created: {resp.json().get('url')}")
     return static_url
 
 
 # ── Ping Slack ────────────────────────────────────────────────────────────────
-def ping_slack(deploy_url: str):
+def ping_slack(deploy_url: str, data: dict):
     print("Pinging Slack...")
-    today_str = datetime.now(zoneinfo.ZoneInfo("America/Chicago")).strftime("%A %b %-d, %Y")
+    today_str = datetime.now(CT).strftime("%A %b %-d, %Y")
+
+    total_today = sum(
+        r.get("productive_today", 0) or 0
+        for r in data["today_rows"]
+    )
+    total_addr = sum(
+        r.get("addressable_today", 0) or 0
+        for r in data["today_rows"]
+    )
 
     payload = {
         "text": f"📦 IW Ops Dashboard updated — {today_str}",
         "blocks": [
             {
                 "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"📦 IW Daily Ops Briefing — {today_str}",
-                    "emoji": True
-                }
+                "text": {"type": "plain_text", "text": f"📦 IW Daily Ops Briefing — {today_str}", "emoji": True},
             },
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Tonight's dashboard has been updated with end-of-day data.\n*Snapshot:* 7:00 PM CT · completed + dry hauls · data via IW DB"
+                    "text": f"*Platform:* {total_today} productive hauls · {total_addr} addressable\n*Snapshot:* 7:00 PM CT · completed + dry hauls · data via IW DB",
                 },
                 "accessory": {
                     "type": "button",
                     "text": {"type": "plain_text", "text": "View Dashboard", "emoji": True},
                     "url": deploy_url,
-                    "style": "primary"
-                }
+                    "style": "primary",
+                },
             },
             {
                 "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"IW Ops Tracker · Built with Claude · <{deploy_url}|Open dashboard>"
-                    }
-                ]
-            }
-        ]
+                "elements": [{"type": "mrkdwn", "text": f"IW Ops Tracker · Built with Claude · <{deploy_url}|Open dashboard>"}],
+            },
+        ],
     }
 
-    resp = requests.post(
-        SLACK_WEBHOOK_URL,
-        json=payload,
-        headers={"Content-Type": "application/json"},
-        timeout=10
-    )
+    resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=10)
     resp.raise_for_status()
     print("Slack notification sent")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    print(f"=== IW Ops Dashboard Build — {datetime.now(timezone.utc).isoformat()} ===")
+    print(f"=== IW Ops Dashboard Build — {datetime.now(CT).isoformat()} ===")
     try:
-        html = call_claude()
+        data = fetch_data()
+        html = call_claude(data)
         write_html(html)
         deploy_url = deploy_to_vercel(html)
-        ping_slack(deploy_url)
+        ping_slack(deploy_url, data)
         print(f"=== Build complete: {deploy_url} ===")
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":
