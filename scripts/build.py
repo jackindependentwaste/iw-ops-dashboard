@@ -61,18 +61,19 @@ The dashboard must include:
 
 CHART REQUIREMENTS - follow exactly:
 0. STABILITY: Chart.js must be loaded from CDN before any chart code runs. All chart initialization must be inside a DOMContentLoaded event listener or called after the DOM is fully loaded. Use requestAnimationFrame only after DOMContentLoaded fires. Never initialize charts inline in the body.
-1. WEEKENDS: exclude weekend dates from the chart entirely UNLESS productive_hauls > 0 on that day.
-2. TWO LINE COLORS: April data uses color #b4b2a9 (gray). May MTD data uses color #1b1c51 (navy). These must be separate Chart.js datasets on the same chart.
-3. TARGET BAND: render as a filled green band between target_min and target_max. Use backgroundColor 'rgba(0,167,117,0.13)' for the fill. Use a dashed borderColor 'rgba(0,167,117,0.4)' on the min line. This must appear as a visible shaded region.
-4. RAIN DOTS: fetch live from Open-Meteo archive API in the browser. Show as blue (#4a90d9) filled circle points with pointRadius 4 on days where precipitation_sum >= 2.54mm. All other points have pointRadius 0.
+1. WEEKENDS: when querying the DB, add any Saturday/Sunday hauls to the preceding Friday's total. Do not plot Saturday or Sunday as separate data points. The chart x-axis should only contain business days (Mon–Fri).
+2. DAILY LINE: all daily haul data (both April and May MTD) must use a single light gray color #d0ceca, borderWidth 1.5. This is the raw daily line showing volatility.
+3. TREND LINE: compute a 5-business-day rolling average over the combined April+May dataset. Plot this as a single dark navy line (#1b1c51, borderWidth 2.5, tension 0.4). This overlays the gray daily line and shows the smoothed direction. The rolling average at index i = average of values at i-4 through i (or fewer if near the start).
+4. TARGET BAND: render as a filled green band between target_min and target_max. Use backgroundColor 'rgba(0,167,117,0.13)' for the fill. Use a dashed borderColor 'rgba(0,167,117,0.4)' on the min line. This must appear as a visible shaded region.
+5. RAIN DOTS: fetch live from Open-Meteo archive API in the browser. Show as blue (#4a90d9) filled circle points with pointRadius 4 on the daily gray line on days where precipitation_sum >= 2.54mm. All other points have pointRadius 0.
    API: https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date=2026-04-01&end_date={today}&timezone=America/Chicago
    Coords: BHM(33.5779,-86.7514), BNA(36.1245,-86.6782), DFW(32.8998,-97.0403), SAT(29.5337,-98.4698), HSV(34.6372,-86.7750)
 
 Chart.js dataset order must be:
-  [0] band top line (target_max values, fill '+1' to next dataset, backgroundColor 'rgba(0,167,117,0.13)', borderColor 'transparent', pointRadius 0)
+  [0] band top line (target_max values, fill '+1', backgroundColor 'rgba(0,167,117,0.13)', borderColor 'transparent', pointRadius 0)
   [1] band bottom line (target_min values, borderColor 'rgba(0,167,117,0.4)', borderDash [3,3], fill false, pointRadius 0)
-  [2] April haul data (borderColor '#b4b2a9', borderWidth 1.5, fill false, pointRadius per rain logic, spanGaps false)
-  [3] May MTD haul data (borderColor '#1b1c51', borderWidth 2, fill false, pointRadius per rain logic, spanGaps false)
+  [2] daily haul line (borderColor '#d0ceca', borderWidth 1.5, fill false, pointRadius per rain logic, spanGaps false) — covers full April+May range
+  [3] 5-business-day rolling average (borderColor '#1b1c51', borderWidth 2.5, fill false, pointRadius 0, tension 0.4, spanGaps false)
 
 April + May MTD daily haul data must be queried from the DB and baked into the HTML as a JS const.
 Open-Meteo is fetched live from the browser - no DB calls from the browser.
