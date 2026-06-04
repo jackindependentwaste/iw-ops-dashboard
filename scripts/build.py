@@ -21,7 +21,10 @@ VERCEL_TOKEN        = os.environ["VERCEL_TOKEN"]
 VERCEL_PROJECT      = "iw-ops-dashboard"
 SLACK_WEBHOOK_URL   = os.environ["SLACK_WEBHOOK_URL"]
 SUPABASE_URL        = "https://gusggxvsgnggxmgmmtve.supabase.co"
-SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # service role for REST API
+SUPABASE_ACCESS_TOKEN = os.environ["SUPABASE_ACCESS_TOKEN"]  # personal token for Management API
+# Direct Postgres connection via Supabase session pooler (port 5432)
+SUPABASE_PROJECT_REF = "gusggxvsgnggxmgmmtve"
 
 MODEL       = "claude-sonnet-4-5"
 OUTPUT_PATH = "public/index.html"
@@ -45,52 +48,13 @@ NORMS = {
     "HSV": {"median_drivers": 1, "p25_drivers": 1, "p75_hauls_per": 6.8},
 }
 
-# ── Supabase REST query ───────────────────────────────────────────────────────
-def supabase_rpc(sql: str) -> list:
-    """Run a raw SQL query via Supabase REST API."""
-    resp = requests.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/execute_sql",
-        headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={"query": sql},
-        timeout=30,
-    )
-    if not resp.ok:
-        # Fallback: try pg endpoint
-        print(f"RPC failed ({resp.status_code}), trying pg endpoint...")
-        raise Exception(f"Supabase query failed: {resp.status_code} {resp.text[:200]}")
-    return resp.json()
-
-
-def supabase_query(sql: str) -> list:
-    """Query via Supabase SQL endpoint."""
-    resp = requests.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/query",
-        headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=representation",
-        },
-        json={"sql": sql},
-        timeout=30,
-    )
-    if resp.ok:
-        return resp.json()
-    raise Exception(f"Query failed: {resp.status_code} {resp.text[:300]}")
-
-
+# ── Database connection ───────────────────────────────────────────────────────
 def run_sql(sql: str) -> list:
-    """Try multiple Supabase SQL execution methods."""
-    # Method 1: pg_meta
+    """Run SQL via Supabase Management API."""
     resp = requests.post(
-        f"{SUPABASE_URL}/pg/query",
+        f"https://api.supabase.com/v1/projects/{SUPABASE_PROJECT_REF}/database/query",
         headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+            "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}",
             "Content-Type": "application/json",
         },
         json={"query": sql},
@@ -98,26 +62,13 @@ def run_sql(sql: str) -> list:
     )
     if resp.ok:
         data = resp.json()
+        # Response is either a list of rows or {"rows": [...]}
         if isinstance(data, list):
             return data
-        if "rows" in data:
+        if isinstance(data, dict) and "rows" in data:
             return data["rows"]
-
-    # Method 2: direct REST with PostgREST RPC
-    resp2 = requests.post(
-        f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
-        headers={
-            "apikey": SUPABASE_SERVICE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={"sql_query": sql},
-        timeout=30,
-    )
-    if resp2.ok:
-        return resp2.json()
-
-    raise Exception(f"All SQL methods failed. Last: {resp2.status_code} {resp2.text[:300]}")
+        return data
+    raise Exception(f"Query failed: {resp.status_code} {resp.text[:400]}")
 
 
 # ── Fetch data ────────────────────────────────────────────────────────────────
