@@ -12,6 +12,7 @@ import json
 import requests
 import anthropic
 from datetime import datetime, timezone
+import zoneinfo
 
 # ── Config ────────────────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -59,6 +60,7 @@ The dashboard must include:
 - Footer with today's date
 
 CHART REQUIREMENTS - follow exactly:
+0. STABILITY: Chart.js must be loaded from CDN before any chart code runs. All chart initialization must be inside a DOMContentLoaded event listener or called after the DOM is fully loaded. Use requestAnimationFrame only after DOMContentLoaded fires. Never initialize charts inline in the body.
 1. WEEKENDS: exclude weekend dates from the chart entirely UNLESS productive_hauls > 0 on that day.
 2. TWO LINE COLORS: April data uses color #b4b2a9 (gray). May MTD data uses color #1b1c51 (navy). These must be separate Chart.js datasets on the same chart.
 3. TARGET BAND: render as a filled green band between target_min and target_max. Use backgroundColor 'rgba(0,167,117,0.13)' for the fill. Use a dashed borderColor 'rgba(0,167,117,0.4)' on the min line. This must appear as a visible shaded region.
@@ -79,7 +81,7 @@ Output ONLY the HTML. Nothing else."""
 
 
 def build_user_prompt():
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(zoneinfo.ZoneInfo("America/Chicago")).strftime("%Y-%m-%d")
     return f"""Today is {today}.
 
 Please:
@@ -157,8 +159,34 @@ def write_html(html: str):
 
 
 # ── Deploy to Vercel ──────────────────────────────────────────────────────────
+def get_vercel_project_id() -> str:
+    """Look up the Vercel project ID by name so we can deploy to it consistently."""
+    resp = requests.get(
+        f"https://api.vercel.com/v9/projects/{VERCEL_PROJECT}",
+        headers={"Authorization": f"Bearer {VERCEL_TOKEN}"},
+        timeout=30
+    )
+    if resp.ok:
+        data = resp.json()
+        project_id = data.get("id")
+        # Get the stable production alias (custom domain or .vercel.app)
+        alias = None
+        for a in data.get("alias", []):
+            if a.get("domain", "").endswith(".vercel.app") and "-" not in a.get("domain","").replace(VERCEL_PROJECT,""):
+                alias = a.get("domain")
+                break
+        if not alias:
+            # fallback: use the project name .vercel.app
+            alias = f"{VERCEL_PROJECT}.vercel.app"
+        return project_id, f"https://{alias}"
+    return None, f"https://{VERCEL_PROJECT}.vercel.app"
+
+
 def deploy_to_vercel(html: str) -> str:
     print("Deploying to Vercel...")
+
+    project_id, static_url = get_vercel_project_id()
+    print(f"Project: {VERCEL_PROJECT} → static URL: {static_url}")
 
     payload = {
         "name": VERCEL_PROJECT,
@@ -178,6 +206,9 @@ def deploy_to_vercel(html: str) -> str:
         "target": "production"
     }
 
+    if project_id:
+        payload["project"] = project_id
+
     resp = requests.post(
         "https://api.vercel.com/v13/deployments",
         headers={
@@ -193,16 +224,15 @@ def deploy_to_vercel(html: str) -> str:
         resp.raise_for_status()
 
     deploy = resp.json()
-    url = deploy.get("url", "")
-    deploy_url = f"https://{url}" if url and not url.startswith("http") else url
-    print(f"Deployed: {deploy_url}")
-    return deploy_url
+    print(f"Deploy created: {deploy.get('url')}")
+    # Always return the static production URL, not the per-deploy preview URL
+    return static_url
 
 
 # ── Ping Slack ────────────────────────────────────────────────────────────────
 def ping_slack(deploy_url: str):
     print("Pinging Slack...")
-    today_str = datetime.now(timezone.utc).strftime("%A %b %-d, %Y")
+    today_str = datetime.now(zoneinfo.ZoneInfo("America/Chicago")).strftime("%A %b %-d, %Y")
 
     payload = {
         "text": f"📦 IW Ops Dashboard updated — {today_str}",
