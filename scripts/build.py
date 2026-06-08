@@ -158,10 +158,80 @@ def fetch_data() -> dict:
     GROUP BY m.name
     """
 
+    # Weekly period stats — 4 periods (current week Mon–today + 3 prior full weeks)
+    period_sql = f"""
+    WITH periods AS (
+      SELECT
+        CASE
+          WHEN DATE_TRUNC('week', gs::date) = DATE_TRUNC('week', '{today_ct}'::date) THEN 0
+          WHEN DATE_TRUNC('week', gs::date) = DATE_TRUNC('week', '{today_ct}'::date) - INTERVAL '7 days' THEN 1
+          WHEN DATE_TRUNC('week', gs::date) = DATE_TRUNC('week', '{today_ct}'::date) - INTERVAL '14 days' THEN 2
+          ELSE 3
+        END AS period_num,
+        gs::date AS day
+      FROM generate_series(
+        DATE_TRUNC('week', '{today_ct}'::date) - INTERVAL '21 days',
+        '{today_ct}'::date,
+        '1 day'::interval
+      ) gs
+      WHERE EXTRACT(DOW FROM gs) NOT IN (0,6)
+    ),
+    daily_hauls AS (
+      SELECT
+        m.name AS market,
+        DATE(o.completed_at AT TIME ZONE 'America/Chicago') AS day,
+        COUNT(*) AS hauls,
+        COUNT(DISTINCT o.driver_id) AS drivers
+      FROM orders o
+      JOIN projects p ON p.id = o.project_id
+      JOIN markets m ON m.id = p.market_id
+      WHERE o.deleted_at IS NULL
+        AND (o.status IN ('completed','billed') OR (o.status = 'canceled' AND o.driver_id IS NOT NULL))
+        AND DATE(o.completed_at AT TIME ZONE 'America/Chicago') >= DATE_TRUNC('week', '{today_ct}'::date) - INTERVAL '21 days'
+        AND DATE(o.completed_at AT TIME ZONE 'America/Chicago') <= '{today_ct}'
+        AND EXTRACT(DOW FROM o.completed_at AT TIME ZONE 'America/Chicago') NOT IN (0,6)
+        AND m.name IN ('BHM','BNA','DFW','SAT','HSV')
+      GROUP BY 1, 2
+    ),
+    daily_addressable AS (
+      SELECT
+        m.name AS market,
+        DATE(o.started_at AT TIME ZONE 'America/Chicago') AS day,
+        COUNT(*) AS addressable
+      FROM orders o
+      JOIN projects p ON p.id = o.project_id
+      JOIN markets m ON m.id = p.market_id
+      WHERE o.deleted_at IS NULL
+        AND o.started_at AT TIME ZONE 'America/Chicago' >= DATE_TRUNC('week', '{today_ct}'::date) - INTERVAL '21 days'
+        AND DATE(o.started_at AT TIME ZONE 'America/Chicago') <= '{today_ct}'
+        AND EXTRACT(DOW FROM o.started_at AT TIME ZONE 'America/Chicago') NOT IN (0,6)
+        AND (o.status NOT IN ('canceled') OR o.driver_id IS NOT NULL)
+        AND m.name IN ('BHM','BNA','DFW','SAT','HSV')
+      GROUP BY 1, 2
+    )
+    SELECT
+      dh.market,
+      p.period_num,
+      MIN(p.day) AS period_start,
+      MAX(p.day) AS period_end,
+      ROUND(AVG(COALESCE(dh.hauls, 0))::numeric, 1) AS avg_hauls,
+      ROUND(AVG(COALESCE(dh.drivers, 0))::numeric, 1) AS avg_drivers,
+      ROUND(AVG(CASE WHEN dh.drivers > 0 THEN dh.hauls::numeric / dh.drivers ELSE 0 END)::numeric, 1) AS avg_hauls_per_driver,
+      ROUND(AVG(COALESCE(da.addressable, 0))::numeric, 1) AS avg_addressable
+    FROM periods p
+    CROSS JOIN (SELECT DISTINCT name FROM markets WHERE name IN ('BHM','BNA','DFW','SAT','HSV')) mk
+    LEFT JOIN daily_hauls dh ON dh.day = p.day AND dh.market = mk.name
+    LEFT JOIN daily_addressable da ON da.day = p.day AND da.market = mk.name
+    GROUP BY dh.market, mk.name, p.period_num
+    HAVING dh.market IS NOT NULL OR mk.name IS NOT NULL
+    ORDER BY mk.name, p.period_num
+    """
+
     try:
         daily_rows  = run_sql(daily_sql)
         today_rows  = run_sql(today_sql)
         mtd_rows    = run_sql(mtd_sql)
+        period_rows = run_sql(period_sql)
     except Exception as e:
         print(f"DB query error: {e}")
         raise
@@ -171,6 +241,7 @@ def fetch_data() -> dict:
         "daily_rows": daily_rows,
         "today_rows": today_rows,
         "mtd_rows": mtd_rows,
+        "period_rows": period_rows,
         "targets": TARGETS,
         "norms": NORMS,
     }
@@ -185,35 +256,58 @@ Output ONLY raw HTML starting with <!DOCTYPE html> — no explanation, no markdo
 IW Brand colors: navy #1b1c51, orange #f26a21, green #00a775, bone background #f5f3ef
 Font: system-ui, sans-serif
 
-The dashboard must include:
-- Platform header: total productive hauls today across all markets, total addressable, MTD avg
-- One card per market (DFW, BHM, SAT, BNA, HSV order): today hauls, addressable, MTD avg, target range, active drivers, verdict badge
-- Action plan table: off-target markets ranked by MTD miss %, verdict, investigate note
+LAYOUT:
+- Platform header at top: total productive hauls today, total addressable, current month MTD avg
+- Markets stacked FULL WIDTH vertically, one per row, in order: DFW, BHM, SAT, BNA, HSV
+- Each market section has two parts side by side: LEFT = chart (60% width), RIGHT = period breakdown (40% width)
+- Action plan table below all markets
 - Footer: "IW Ops Dashboard · {date} · Data via IW DB"
 
-VERDICT LOGIC (check in order, first that trips wins):
-1. Sales gap: addressable_today < target_min
-2. Driver gap: active_drivers <= p25_drivers from norms
-3. Capacity ceiling: (productive_today / active_drivers) >= p75_hauls_per from norms
-4. Throughput gap: default if board full and drivers present but still missing target
-If on target: show green "On target" badge
+MARKET SECTION — LEFT SIDE (chart):
+- Full width chart, height 160px
+- Shows previous calendar month + current calendar month data only
+- X-axis: business days only (Mon–Fri), no empty weekend gaps
+- Market name, today's haul count, target range, verdict badge shown above chart
+- Today hauls / Addressable / Active drivers shown as small stats row above chart
+
+MARKET SECTION — RIGHT SIDE (period breakdown):
+- 4 weekly periods: current week (Mon–today) + 3 prior full Mon–Sun weeks
+- Label each: "Jun 2–8", "May 26–Jun 1", "May 19–25", "May 12–18" etc.
+- For each period show:
+  * Avg productive hauls/day (bold, large)
+  * Verdict badge (same logic as below)
+  * Stats row: X drivers · Y hauls/driver · Z avg addressable/day
+- Stack periods vertically, most recent at top
+
+VERDICT LOGIC — apply per period using that period's averages vs fixed norms:
+1. Sales gap: avg_addressable_per_day < target_min  ← board was thin
+2. Driver gap: avg_active_drivers <= p25_drivers from norms
+3. Capacity ceiling: avg_hauls_per_driver >= p75_hauls_per from norms AND avg_hauls < target_min
+4. Throughput gap: default — board full, drivers present, not at ceiling, still missing target
+5. On target: avg_hauls >= target_min → green badge
+
+VERDICT COLORS: Sales gap = orange, Driver gap = amber, Capacity ceiling = blue, Throughput gap = orange, On target = green
 
 CHART REQUIREMENTS:
 - Use Chart.js from https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js
 - All chart initialization inside window.addEventListener('load', ...) — never inline
-- One mini chart per card, height 72px
-- X-axis: business days only (Mon-Fri), no weekend dates unless hauls > 0
-- Dataset order in Chart.js:
+- Dataset order:
   [0] Target band top (target_max, fill '+1', backgroundColor 'rgba(0,167,117,0.13)', borderColor 'transparent', pointRadius 0)
   [1] Target band bottom (target_min, borderDash [3,3], borderColor 'rgba(0,167,117,0.35)', fill false, pointRadius 0)
-  [2] Daily hauls line (borderColor '#d0ceca', borderWidth 1.5, fill false, pointRadius 0 except rain dots which are blue #4a90d9 pointRadius 4, spanGaps false)
+  [2] Daily hauls line (borderColor '#d0ceca', borderWidth 1.5, fill false, pointRadius 0 except rain dots blue #4a90d9 pointRadius 4, spanGaps false)
   [3] 5-business-day rolling average (borderColor '#1b1c51', borderWidth 2.5, tension 0.4, fill false, pointRadius 0)
-- Rolling average: for each index i, average of up to 5 preceding values including i
-- Rain dots: fetch Open-Meteo live in browser for each market, mark days >= 2.54mm precipitation
-  URL: https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date=2026-04-01&end_date={today}&timezone=America/Chicago
+- Rolling avg: index i = mean of up to 5 values ending at i
+- Rain dots: fetch Open-Meteo live in browser per market, mark days >= 2.54mm
+  URL: https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lng}&daily=precipitation_sum&start_date={prev_month_start}&end_date={today}&timezone=America/Chicago
   Coords: BHM(33.5779,-86.7514), BNA(36.1245,-86.6782), DFW(32.8998,-97.0403), SAT(29.5337,-98.4698), HSV(34.6372,-86.7750)
 
-Bake all haul data into the HTML as JS constants. Open-Meteo fetched live from browser only.
+ACTION PLAN TABLE:
+- Only show markets where current week avg < target_min
+- Rank by current week miss % (most off target first)
+- Columns: Market | Current week avg | Verdict | Investigate note
+
+Bake ALL haul data and period stats into the HTML as JS constants — computed server-side from the data provided.
+Open-Meteo fetched live from browser only. No other live API calls from browser.
 
 Output ONLY the HTML. Nothing else."""
 
@@ -223,14 +317,17 @@ def build_user_prompt(data: dict) -> str:
 
 Here is the pre-fetched data from the IW database:
 
-DAILY HAULS (April 1 through today, weekends rolled into preceding Friday):
+DAILY HAULS (previous month + current month, weekends rolled into preceding Friday):
 {json.dumps(data['daily_rows'], indent=2)}
 
 TODAY'S SUMMARY PER MARKET:
 {json.dumps(data['today_rows'], indent=2)}
 
-MTD AVERAGE PER MARKET:
+MTD AVERAGE PER MARKET (current month):
 {json.dumps(data['mtd_rows'], indent=2)}
+
+WEEKLY PERIOD STATS (4 periods: period_num 0=current week, 1=last week, 2=two weeks ago, 3=three weeks ago):
+{json.dumps(data['period_rows'], indent=2)}
 
 TARGETS: {json.dumps(data['targets'])}
 
